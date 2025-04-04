@@ -1,0 +1,792 @@
+---
+title: "Frequency Validation 2"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+# Code setup
+
+Loading libraries and functions, reading and preprocessing data.
+
+```{r, warning = FALSE, message = FALSE}
+library(tidyverse)
+library(heatwaveR)
+library(ncdf4)
+library(R.matlab)
+#library(patchwork)
+#library(logKDE)
+```
+
+```{r}
+read_data = FALSE
+process = "sst"
+sites <- c("Port l'Hebert", "Taylor's Head Shallow")
+site_labels <- c("Port L'Hebert", "Taylor's Head")
+pal <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442")
+source("setup.R")
+```
+
+# Reading CMIP6
+
+```{r}
+ph_cmip6 <- readCMIP6("../data/Port_LHebert/cmip6_2000_to_2024.mat")
+th_cmip6 <- readCMIP6("../data/TaylorHead/cmip6_2000_to_2024.mat")
+
+ph_cmip6 <- ph_cmip6 |>
+  mutate("site" = "Port L'Hebert")
+th_cmip6 <- th_cmip6 |>
+  mutate("site" = "Taylor's Head")
+cmip6 <- bind_rows(ph_cmip6, th_cmip6) |>
+  mutate("type" = "CMIP6") |>
+  select("t" = time, site, type, temp)
+```
+
+# Processing Data
+
+Filtering between May 28th, 2018 to March 20th, 2020.
+
+```{r}
+hourly <- hourly_dataframe |>
+  filter(between(time, dates$freq[1], dates$freq[2])) |>
+  select(-GLORYS) |>
+  rename("t" = time) |>
+  pivot_longer(
+    c(OBS, FVCOM, FVCOM2),
+    names_to = "type",
+    values_to = "temp"
+  ) |>
+  remove_missing_times()
+
+daily <- daily_dataframe |>
+  filter(between(time, dates$freq[1], dates$freq[2])) |>
+  rename("t" = time) |>
+  pivot_longer(
+    c(OBS, FVCOM, FVCOM2, GLORYS),
+    names_to = "type",
+    values_to = "temp"
+  ) |>
+  remove_missing_times()
+
+monthly <- daily |>
+  bind_rows(cmip6) |>
+  filter(between(t, dates$freq[1], dates$freq[2])) |>
+  mutate(
+    "year" = year(t),
+    "month" = month(t)
+  ) |>
+  group_by(site, type, year, month) |>
+  summarize(
+    "temp" = mean(temp),
+    .groups = "drop"
+  ) |>
+  mutate(
+    "t" = make_date(year, month),
+  ) |>
+  select(t, site, type, temp)
+```
+
+## Decomposing Temeprature Time Series
+
+```{r}
+hourly_filtered <- hourly |>
+  group_by(site, type) |>
+  mutate(
+    "seas" = smooth.spline(temp, nknots = 16)$y,
+    "anomaly" = temp - seas,
+    "met" = freq_filter(anomaly, 1, 1/48, type = "lowpass"),
+    "tidal" = anomaly - met
+  ) |>
+  ungroup()
+
+daily_filtered <- daily |>
+  group_by(site, type) |>
+  mutate(
+    "seas" = smooth.spline(temp, nknots = 16)$y,
+    "anomaly" = temp - seas,
+    "met" = freq_filter(anomaly, 1, 1/2, type = "lowpass"),
+    "tidal" = anomaly - met
+  ) |>
+  ungroup()
+```
+
+# Plotting Auto-correlation Functions
+
+```{r}
+hourly_filtered |>
+  group_by(site, type) |>
+  reframe(
+    "lag" = acf(anomaly, lag.max = 500, type = "correlation", plot = FALSE)$lag,
+    "acf" = acf(anomaly, lag.max = 500, type = "correlation", plot = FALSE)$acf
+  ) |>
+  mutate(type = factor(type, levels = c("OBS", "FVCOM", "FVCOM2"))) |>
+  ggplot(aes(x = lag, y = acf)) +
+  geom_hline(aes(yintercept = 0)) +
+  geom_segment(aes(xend = lag, yend = 0)) +
+  facet_grid(type ~ site, 
+             labeller = as_labeller(c("FVCOM" = "FVCOMv1",
+                                      "FVCOM2" = "FVCOMv2",
+                                      "OBS" = "Observations",
+                                      "Port L'Hebert" = "Port L'Hebert",
+                                      "Taylor's Head" = "Taylor's Head"))) +
+  theme_bw() +
+  labs(
+    title = "Auto-correlation Functions of the Anomalies",
+    x = "Lag",
+    y = "Auto-correlation"
+  )
+```
+
+# Plotting Cross-correlation Functions
+
+```{r}
+hourly_filtered |>
+  select(t, site, type, anomaly) |>
+  pivot_wider(
+    names_from = type,
+    values_from = anomaly
+  ) |>
+  pivot_longer(
+    c(FVCOM, FVCOM2),
+    names_to = "type",
+    values_to = "anomaly"
+  ) |>
+  group_by(site, type) |>
+  reframe(
+    "lag" = ccf(OBS, anomaly, lag.max = 250, type = "correlation", plot = FALSE)$lag[,1,1],
+    "ccf" = ccf(OBS, anomaly, lag.max = 250, type = "correlation", plot = FALSE)$acf[,1,1]
+  ) |>
+  mutate(type = factor(type, levels = c("FVCOM", "FVCOM2"))) |>
+  ggplot(aes(x = lag, y = ccf)) +
+  geom_hline(aes(yintercept = 0)) +
+  geom_segment(aes(xend = lag, yend = 0)) +
+  facet_grid(type ~ site, 
+             labeller = as_labeller(c("FVCOM" = "FVCOMv1",
+                                      "FVCOM2" = "FVCOMv2",
+                                      "Port L'Hebert" = "Port L'Hebert",
+                                      "Taylor's Head" = "Taylor's Head"))) +
+  theme_bw() +
+  labs(
+    title = "Cross-correlation of the Anomalies with Respect to the Observations",
+    x = "Lag",
+    y = "Cross-correlation"
+  )
+```
+
+# Plotting Power Spectrums
+
+```{r}
+hourly_spectrum <- hourly_filtered |>
+  group_by(site, type) |>
+  reframe(
+    "freq" = spec.pgram(anomaly, spans = 21, plot = FALSE)$freq,
+    "power" = spec.pgram(anomaly, spans = 21, plot = FALSE)$spec
+  )
+
+glorys_spectrum <- daily_filtered |>
+  filter(type == "GLORYS") |>
+  group_by(site) |>
+  reframe(
+    "freq" = spec.pgram(anomaly, spans = 21, plot = FALSE)$freq,
+    "power" = spec.pgram(anomaly, spans = 21, plot = FALSE)$spec
+  ) |>
+  mutate("freq" = freq / 24) |>
+  mutate("type" = "GLORYS")
+
+bind_rows(hourly_spectrum, glorys_spectrum) |>
+  filter(freq < 0.1) |>
+  mutate(type = factor(type, levels = c("OBS", "FVCOM", "FVCOM2", "GLORYS"))) |>
+  ggplot(aes(x = freq, y = log(power))) +
+  geom_line() +
+  geom_vline(aes(xintercept = 1 / 25.82), lty = 2, lwd = 0.7, col = pal[3]) +
+  geom_vline(aes(xintercept = 1 / 24), lty = 2, lwd = 0.7, col = pal[1]) +
+  geom_vline(aes(xintercept = 1 / 12.42), lty = 2, lwd = 0.7, col = pal[4]) +
+  geom_vline(aes(xintercept = 1 / 12), lty = 2, lwd = 0.7, col = pal[2]) +
+  facet_grid(type ~ site, 
+             labeller = as_labeller(c("FVCOM" = "FVCOMv1",
+                                      "FVCOM2" = "FVCOMv2",
+                                      "OBS" = "Observations",
+                                      "GLORYS" = "GLORYS12v1",
+                                      "Port L'Hebert" = "Port L'Hebert",
+                                      "Taylor's Head" = "Taylor's Head"))) +
+  scale_x_continuous(
+    breaks = c(0, 0.025, 0.050, 0.075, 0.1),
+    labels = c("0", "0.025", "0.05", "0.075", "0.1")
+  ) +
+  labs(
+    title = "",
+    x = "Frequency (1/hour)",
+    y = "Log power"
+  ) +
+  theme_bw() +
+  theme(
+    strip.text = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12),
+  )
+```
+
+## Estimating Slope of the High Frequencies
+
+```{r}
+hourly_filtered |>
+  group_by(site, type) |>
+  reframe(
+    "freq" = spec.pgram(anomaly, spans = 21, plot = FALSE)$freq,
+    "power" = spec.pgram(anomaly, spans = 21, plot = FALSE)$spec
+  ) |>
+  filter(freq > 1/6) |>
+  mutate(type = factor(type, levels = c("OBS", "FVCOM", "FVCOM2"))) |>
+  ggplot(aes(x = log(freq), y = log(power))) +
+  geom_line() +
+  geom_smooth(method = "lm", formula = y ~ x, col = "red") +
+  facet_grid(type ~ site, 
+             labeller = as_labeller(c("FVCOM" = "FVCOMv1",
+                                      "FVCOM2" = "FVCOMv2",
+                                      "OBS" = "Observations",
+                                      "Port L'Hebert" = "Port L'Hebert",
+                                      "Taylor's Head" = "Taylor's Head"))) +
+  labs(
+    title = "",
+    x = "Log frequency",
+    y = "Log power"
+  ) +
+  theme_bw() +
+  theme(
+    strip.text = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12),
+  )
+```
+
+```{r}
+hourly_filtered |>
+  group_by(site, type) |>
+  reframe(
+    "freq" = spec.pgram(anomaly, spans = 21, plot = FALSE)$freq,
+    "power" = spec.pgram(anomaly, spans = 21, plot = FALSE)$spec
+  ) |>
+  filter(freq > 1/6) |>
+  mutate(type = factor(type, levels = c("OBS", "FVCOM", "FVCOM2"))) |>
+  group_by(site, type) |>
+  summarize(
+    "slope" = get_slope(log(freq), log(power)),
+    .groups = "drop"
+  )
+```
+
+# Time Series Decomposition
+
+## Port L'Hebert FVCOMv1
+
+```{r}
+hourly_filtered |>
+  filter(site == "Port L'Hebert") |>
+  filter(type %in% c("OBS", "FVCOM")) |>
+  pivot_longer(
+    c(seas, met, tidal),
+    names_to = "temp_type",
+    values_to = "temp_value"
+  ) |>
+  mutate(
+    type = factor(type, levels = c("OBS", "FVCOM")),
+    temp_type = factor(temp_type, levels = c("seas", "met", "tidal"))
+  ) |>
+  ggplot(aes(x = t, y = temp_value, col = type)) +
+  geom_line(lwd = 0.7) +
+  facet_wrap(~temp_type, ncol = 1, scales = "free",
+             labeller = as_labeller(c("seas" = "Seasonal",
+                                      "met" = "Meteorological",
+                                      "tidal" = "Tidal"))) +
+  scale_color_manual(
+    name = "",
+    values = c("black", "blue"),
+    breaks = c("OBS", "FVCOM"),
+    labels = c("Observations", "FVCOMv1")
+  ) +
+  labs(
+    title = "",
+    x = "Time",
+    y = "Temperature [\u00B0C]"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size = 12),
+    legend.key.width = unit(2, "cm"),
+    strip.text = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12)
+  ) +
+  guides(col = guide_legend(override.aes = list(lwd = 1.2)))
+```
+
+## Port L'Hebert FVCOMv2
+
+```{r}
+hourly_filtered |>
+  filter(site == "Port L'Hebert") |>
+  filter(type %in% c("OBS", "FVCOM2")) |>
+  pivot_longer(
+    c(seas, met, tidal),
+    names_to = "temp_type",
+    values_to = "temp_value"
+  ) |>
+  mutate(
+    type = factor(type, levels = c("OBS", "FVCOM2")),
+    temp_type = factor(temp_type, levels = c("seas", "met", "tidal"))
+  ) |>
+  ggplot(aes(x = t, y = temp_value, col = type)) +
+  geom_line(lwd = 0.7) +
+  facet_wrap(~temp_type, ncol = 1, scales = "free",
+             labeller = as_labeller(c("seas" = "Seasonal",
+                                      "met" = "Meteorological",
+                                      "tidal" = "Tidal"))) +
+  scale_color_manual(
+    name = "",
+    values = c("black", "blue"),
+    breaks = c("OBS", "FVCOM2"),
+    labels = c("Observations", "FVCOMv2")
+  ) +
+  labs(
+    title = "",
+    x = "Time",
+    y = "Temperature [\u00B0C]"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size = 12),
+    legend.key.width = unit(2, "cm"),
+    strip.text = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12)
+  ) +
+  guides(col = guide_legend(override.aes = list(lwd = 1.2)))
+```
+
+## Taylor's Head FVCOMv1
+
+```{r}
+hourly_filtered |>
+  filter(site == "Taylor's Head") |>
+  filter(type %in% c("OBS", "FVCOM")) |>
+  pivot_longer(
+    c(seas, met, tidal),
+    names_to = "temp_type",
+    values_to = "temp_value"
+  ) |>
+  mutate(
+    type = factor(type, levels = c("OBS", "FVCOM")),
+    temp_type = factor(temp_type, levels = c("seas", "met", "tidal"))
+  ) |>
+  ggplot(aes(x = t, y = temp_value, col = type)) +
+  geom_line(lwd = 0.7) +
+  facet_wrap(~temp_type, ncol = 1, scales = "free",
+             labeller = as_labeller(c("seas" = "Seasonal",
+                                      "met" = "Meteorological",
+                                      "tidal" = "Tidal"))) +
+  scale_color_manual(
+    name = "",
+    values = c("black", "blue"),
+    breaks = c("OBS", "FVCOM"),
+    labels = c("Observations", "FVCOMv1")
+  ) +
+  labs(
+    title = "",
+    x = "Time",
+    y = "Temperature [\u00B0C]"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size = 12),
+    legend.key.width = unit(2, "cm"),
+    strip.text = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12)
+  ) +
+  guides(col = guide_legend(override.aes = list(lwd = 1.2)))
+```
+
+## Taylor's Head FVCOMv2
+
+```{r}
+hourly_filtered |>
+  filter(site == "Taylor's Head") |>
+  filter(type %in% c("OBS", "FVCOM2")) |>
+  pivot_longer(
+    c(seas, met, tidal),
+    names_to = "temp_type",
+    values_to = "temp_value"
+  ) |>
+  mutate(
+    type = factor(type, levels = c("OBS", "FVCOM2")),
+    temp_type = factor(temp_type, levels = c("seas", "met", "tidal"))
+  ) |>
+  ggplot(aes(x = t, y = temp_value, col = type)) +
+  geom_line(lwd = 0.7) +
+  facet_wrap(~temp_type, ncol = 1, scales = "free",
+             labeller = as_labeller(c("seas" = "Seasonal",
+                                      "met" = "Meteorological",
+                                      "tidal" = "Tidal"))) +
+  scale_color_manual(
+    name = "",
+    values = c("black", "blue"),
+    breaks = c("OBS", "FVCOM2"),
+    labels = c("Observations", "FVCOMv2")
+  ) +
+  labs(
+    title = "",
+    x = "Time",
+    y = "Temperature [\u00B0C]"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size = 12),
+    legend.key.width = unit(2, "cm"),
+    strip.text = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12)
+  ) +
+  guides(col = guide_legend(override.aes = list(lwd = 1.2)))
+```
+
+# Calculating Metrics for Specific Bands
+
+## Port L'Hebert
+
+```{r}
+ph_hourly_filtered_wide  <- hourly_filtered |>
+  filter(site == "Port L'Hebert") |>
+  pivot_longer(
+    c(temp, seas, met, tidal),
+    names_to = "temp_type",
+    values_to = "temp"
+  ) |>
+  unite("type", type, temp_type, sep = "_") |>
+  select(t, type, temp) |>
+  pivot_wider(
+    names_from = type,
+    values_from = temp
+  )
+
+bind_cols(
+  apply_metrics(
+    ph_hourly_filtered_wide$OBS_temp,
+    ph_hourly_filtered_wide$FVCOM_temp,
+    pred_label = "FVCOMv1 Temp",
+    metric_funcs = list(bias, rmse, sig_star, cor, willmott, nse),
+    metric_labels = c("B", "RMSE", "sig_star", "R", "WS", "NSE")
+  ),
+  apply_metrics(
+    ph_hourly_filtered_wide$OBS_seas,
+    ph_hourly_filtered_wide$FVCOM_seas,
+    pred_label = "FVCOMv1 Seas",
+    metric_funcs = list(bias, rmse, sig_star, cor, willmott, nse),
+    metric_labels = c("B", "RMSE", "sig_star", "R", "WS", "NSE")
+  ) |> select(-metric),
+  apply_metrics(
+    ph_hourly_filtered_wide$OBS_met,
+    ph_hourly_filtered_wide$FVCOM_met,
+    pred_label = "FVCOMv1 Met",
+    metric_funcs = list(bias, rmse, sig_star, cor, willmott, nse),
+    metric_labels = c("B", "RMSE", "sig_star", "R", "WS", "NSE")
+  ) |> select(-metric),
+  apply_metrics(
+    ph_hourly_filtered_wide$OBS_tidal,
+    ph_hourly_filtered_wide$FVCOM_tidal,
+    pred_label = "FVCOMv1 Tidal",
+    metric_funcs = list(bias, rmse, sig_star, cor, willmott, nse),
+    metric_labels = c("B", "RMSE", "sig_star", "R", "WS", "NSE")
+  ) |> select(-metric)
+) |>
+  mutate(across(where(is.numeric), ~ round(.x, 3)))
+
+bind_cols(
+  apply_metrics(
+    ph_hourly_filtered_wide$OBS_temp,
+    ph_hourly_filtered_wide$FVCOM2_temp,
+    pred_label = "FVCOMv2 Temp",
+    metric_funcs = list(bias, rmse, sig_star, cor, willmott, nse),
+    metric_labels = c("B", "RMSE", "sig_star", "R", "WS", "NSE")
+  ),
+  apply_metrics(
+    ph_hourly_filtered_wide$OBS_seas,
+    ph_hourly_filtered_wide$FVCOM2_seas,
+    pred_label = "FVCOMv2 Seas",
+    metric_funcs = list(bias, rmse, sig_star, cor, willmott, nse),
+    metric_labels = c("B", "RMSE", "sig_star", "R", "WS", "NSE")
+  ) |> select(-metric),
+  apply_metrics(
+    ph_hourly_filtered_wide$OBS_met,
+    ph_hourly_filtered_wide$FVCOM2_met,
+    pred_label = "FVCOMv2 Met",
+    metric_funcs = list(bias, rmse, sig_star, cor, willmott, nse),
+    metric_labels = c("B", "RMSE", "sig_star", "R", "WS", "NSE")
+  ) |> select(-metric),
+  apply_metrics(
+    ph_hourly_filtered_wide$OBS_tidal,
+    ph_hourly_filtered_wide$FVCOM2_tidal,
+    pred_label = "FVCOMv2 Tidal",
+    metric_funcs = list(bias, rmse, sig_star, cor, willmott, nse),
+    metric_labels = c("B", "RMSE", "sig_star", "R", "WS", "NSE")
+  ) |> select(-metric)
+) |>
+  mutate(across(where(is.numeric), ~ round(.x, 3)))
+```
+
+## Taylor's Head
+
+```{r}
+th_hourly_filtered_wide  <- hourly_filtered |>
+  filter(site == "Taylor's Head") |>
+  pivot_longer(
+    c(temp, seas, met, tidal),
+    names_to = "temp_type",
+    values_to = "temp"
+  ) |>
+  unite("type", type, temp_type, sep = "_") |>
+  select(t, type, temp) |>
+  pivot_wider(
+    names_from = type,
+    values_from = temp
+  )
+
+bind_cols(
+  apply_metrics(
+    th_hourly_filtered_wide$OBS_temp,
+    th_hourly_filtered_wide$FVCOM_temp,
+    pred_label = "FVCOMv1 Temp",
+    metric_funcs = list(bias, rmse, sig_star, cor, willmott, nse),
+    metric_labels = c("B", "RMSE", "sig_star", "R", "WS", "NSE")
+  ),
+  apply_metrics(
+    th_hourly_filtered_wide$OBS_seas,
+    th_hourly_filtered_wide$FVCOM_seas,
+    pred_label = "FVCOMv1 Seas",
+    metric_funcs = list(bias, rmse, sig_star, cor, willmott, nse),
+    metric_labels = c("B", "RMSE", "sig_star", "R", "WS", "NSE")
+  ) |> select(-metric),
+  apply_metrics(
+    th_hourly_filtered_wide$OBS_met,
+    th_hourly_filtered_wide$FVCOM_met,
+    pred_label = "FVCOMv1 Met",
+    metric_funcs = list(bias, rmse, sig_star, cor, willmott, nse),
+    metric_labels = c("B", "RMSE", "sig_star", "R", "WS", "NSE")
+  ) |> select(-metric),
+  apply_metrics(
+    th_hourly_filtered_wide$OBS_tidal,
+    th_hourly_filtered_wide$FVCOM_tidal,
+    pred_label = "FVCOMv1 Tidal",
+    metric_funcs = list(bias, rmse, sig_star, cor, willmott, nse),
+    metric_labels = c("B", "RMSE", "sig_star", "R", "WS", "NSE")
+  ) |> select(-metric)
+) |>
+  mutate(across(where(is.numeric), ~ round(.x, 3)))
+
+bind_cols(
+  apply_metrics(
+    th_hourly_filtered_wide$OBS_temp,
+    th_hourly_filtered_wide$FVCOM2_temp,
+    pred_label = "FVCOMv2 Temp",
+    metric_funcs = list(bias, rmse, sig_star, cor, willmott, nse),
+    metric_labels = c("B", "RMSE", "sig_star", "R", "WS", "NSE")
+  ),
+  apply_metrics(
+    th_hourly_filtered_wide$OBS_seas,
+    th_hourly_filtered_wide$FVCOM2_seas,
+    pred_label = "FVCOMv2 Seas",
+    metric_funcs = list(bias, rmse, sig_star, cor, willmott, nse),
+    metric_labels = c("B", "RMSE", "sig_star", "R", "WS", "NSE")
+  ) |> select(-metric),
+  apply_metrics(
+    th_hourly_filtered_wide$OBS_met,
+    th_hourly_filtered_wide$FVCOM2_met,
+    pred_label = "FVCOMv2 Met",
+    metric_funcs = list(bias, rmse, sig_star, cor, willmott, nse),
+    metric_labels = c("B", "RMSE", "sig_star", "R", "WS", "NSE")
+  ) |> select(-metric),
+  apply_metrics(
+    th_hourly_filtered_wide$OBS_tidal,
+    th_hourly_filtered_wide$FVCOM2_tidal,
+    pred_label = "FVCOMv2 Tidal",
+    metric_funcs = list(bias, rmse, sig_star, cor, willmott, nse),
+    metric_labels = c("B", "RMSE", "sig_star", "R", "WS", "NSE")
+  ) |> select(-metric)
+) |>
+  mutate(across(where(is.numeric), ~ round(.x, 3)))
+```
+
+# Daily GLORYS12v1 decomposition
+
+## Port L'Hebert
+
+```{r}
+daily_filtered |>
+  filter(site == "Port L'Hebert") |>
+  filter(type %in% c("OBS", "GLORYS")) |>
+  pivot_longer(
+    c(seas, met),
+    names_to = "temp_type",
+    values_to = "temp_value"
+  ) |>
+  mutate(
+    type = factor(type, levels = c("OBS", "GLORYS")),
+    temp_type = factor(temp_type, levels = c("seas", "met"))
+  ) |>
+  ggplot(aes(x = t, y = temp_value, col = type)) +
+  geom_line(lwd = 0.7) +
+  facet_wrap(~temp_type, ncol = 1, scales = "free",
+             labeller = as_labeller(c("seas" = "Seasonal",
+                                      "met" = "Meteorological"))) +
+  scale_color_manual(
+    name = "",
+    values = c("black", "blue"),
+    breaks = c("OBS", "GLORYS"),
+    labels = c("Observations", "GLORYS12v1")
+  ) +
+  labs(
+    title = "",
+    x = "Time",
+    y = "Temperature [\u00B0C]"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size = 12),
+    legend.key.width = unit(2, "cm"),
+    strip.text = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12)
+  ) +
+  guides(col = guide_legend(override.aes = list(lwd = 1.2)))
+```
+
+## Taylor's Head
+
+```{r}
+daily_filtered |>
+  filter(site == "Taylor's Head") |>
+  filter(type %in% c("OBS", "GLORYS")) |>
+  pivot_longer(
+    c(seas, met),
+    names_to = "temp_type",
+    values_to = "temp_value"
+  ) |>
+  mutate(
+    type = factor(type, levels = c("OBS", "GLORYS")),
+    temp_type = factor(temp_type, levels = c("seas", "met"))
+  ) |>
+  ggplot(aes(x = t, y = temp_value, col = type)) +
+  geom_line(lwd = 0.7) +
+  facet_wrap(~temp_type, ncol = 1, scales = "free",
+             labeller = as_labeller(c("seas" = "Seasonal",
+                                      "met" = "Meteorological"))) +
+  scale_color_manual(
+    name = "",
+    values = c("black", "blue"),
+    breaks = c("OBS", "GLORYS"),
+    labels = c("Observations", "GLORYS12v1")
+  ) +
+  labs(
+    title = "",
+    x = "Time",
+    y = "Temperature [\u00B0C]"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size = 12),
+    legend.key.width = unit(2, "cm"),
+    strip.text = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12)
+  ) +
+  guides(col = guide_legend(override.aes = list(lwd = 1.2)))
+```
+
+## Calculating Daily Metrics
+
+```{r}
+ph_daily_filtered_wide  <- daily_filtered |>
+  filter(site == "Port L'Hebert") |>
+  pivot_longer(
+    c(temp, seas, met),
+    names_to = "temp_type",
+    values_to = "temp"
+  ) |>
+  unite("type", type, temp_type, sep = "_") |>
+  select(t, type, temp) |>
+  pivot_wider(
+    names_from = type,
+    values_from = temp
+  )
+
+th_daily_filtered_wide  <- daily_filtered |>
+  filter(site == "Taylor's Head") |>
+  pivot_longer(
+    c(temp, seas, met),
+    names_to = "temp_type",
+    values_to = "temp"
+  ) |>
+  unite("type", type, temp_type, sep = "_") |>
+  select(t, type, temp) |>
+  pivot_wider(
+    names_from = type,
+    values_from = temp
+  )
+
+bind_cols(
+  apply_metrics(
+    ph_daily_filtered_wide$OBS_temp,
+    ph_daily_filtered_wide$GLORYS_temp,
+    pred_label = "GLORYS Temp",
+    metric_funcs = list(bias, rmse, sig_star, cor, willmott, nse),
+    metric_labels = c("B", "RMSE", "sig_star", "R", "WS", "NSE")
+  ),
+  apply_metrics(
+    ph_daily_filtered_wide$OBS_seas,
+    ph_daily_filtered_wide$GLORYS_seas,
+    pred_label = "GLORYS Seas",
+    metric_funcs = list(bias, rmse, sig_star, cor, willmott, nse),
+    metric_labels = c("B", "RMSE", "sig_star", "R", "WS", "NSE")
+  ) |> select(-metric),
+  apply_metrics(
+    ph_daily_filtered_wide$OBS_met,
+    ph_daily_filtered_wide$GLORYS_met,
+    pred_label = "GLORYS Met",
+    metric_funcs = list(bias, rmse, sig_star, cor, willmott, nse),
+    metric_labels = c("B", "RMSE", "sig_star", "R", "WS", "NSE")
+  ) |> select(-metric)
+) |>
+  mutate(across(where(is.numeric), ~ round(.x, 3)))
+
+bind_cols(
+  apply_metrics(
+    th_daily_filtered_wide$OBS_temp,
+    th_daily_filtered_wide$GLORYS_temp,
+    pred_label = "GLORYS Temp",
+    metric_funcs = list(bias, rmse, sig_star, cor, willmott, nse),
+    metric_labels = c("B", "RMSE", "sig_star", "R", "WS", "NSE")
+  ),
+  apply_metrics(
+    th_daily_filtered_wide$OBS_seas,
+    th_daily_filtered_wide$GLORYS_seas,
+    pred_label = "GLORYS Seas",
+    metric_funcs = list(bias, rmse, sig_star, cor, willmott, nse),
+    metric_labels = c("B", "RMSE", "sig_star", "R", "WS", "NSE")
+  ) |> select(-metric),
+  apply_metrics(
+    th_daily_filtered_wide$OBS_met,
+    th_daily_filtered_wide$GLORYS_met,
+    pred_label = "GLORYS Met",
+    metric_funcs = list(bias, rmse, sig_star, cor, willmott, nse),
+    metric_labels = c("B", "RMSE", "sig_star", "R", "WS", "NSE")
+  ) |> select(-metric)
+) |>
+  mutate(across(where(is.numeric), ~ round(.x, 3)))
+```
+
+

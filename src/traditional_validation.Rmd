@@ -1,0 +1,456 @@
+---
+title: "Traditional Validation"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+# Code setup
+
+Loading libraries and functions, reading and preprocessing data.
+
+```{r, warning = FALSE, message = FALSE}
+library(tidyverse)
+library(heatwaveR)
+library(ncdf4)
+library(R.matlab)
+#library(patchwork)
+#library(logKDE)
+```
+
+```{r}
+read_data = FALSE
+process = "sst"
+sites <- c("Port l'Hebert", "Taylor's Head Shallow")
+site_labels <- c("Port L'Hebert", "Taylor's Head")
+pal <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442")
+source("setup.R")
+```
+
+# Reading CMIP6 Data
+
+```{r}
+ph_cmip6 <- readCMIP6("../data/Port_LHebert/cmip6_2000_to_2024.mat")
+th_cmip6 <- readCMIP6("../data/TaylorHead/cmip6_2000_to_2024.mat")
+
+ph_cmip6 <- ph_cmip6 |>
+  mutate("site" = "Port L'Hebert")
+th_cmip6 <- th_cmip6 |>
+  mutate("site" = "Taylor's Head")
+cmip6 <- bind_rows(ph_cmip6, th_cmip6) |>
+  mutate("type" = "CMIP6") |>
+  select("t" = time, site, type, temp)
+```
+
+# Processing Data
+
+Filtering between May 28th, 2018 to March 20th, 2020.
+
+```{r}
+hourly <- hourly_dataframe |>
+  filter(between(time, dates$freq[1], dates$freq[2])) |>
+  select(-GLORYS) |>
+  rename("t" = time) |>
+  pivot_longer(
+    c(OBS, FVCOM, FVCOM2),
+    names_to = "type",
+    values_to = "temp"
+  ) |>
+  remove_missing_times()
+
+hourly |>
+  ggplot(aes(x = t, y = temp, col = type)) +
+  geom_line() +
+  facet_wrap(~site, ncol = 1)
+
+daily <- daily_dataframe |>
+  filter(between(time, dates$freq[1], dates$freq[2])) |>
+  rename("t" = time) |>
+  pivot_longer(
+    c(OBS, FVCOM, FVCOM2, GLORYS),
+    names_to = "type",
+    values_to = "temp"
+  ) |>
+  remove_missing_times()
+
+daily |>
+  ggplot(aes(x = t, y = temp, col = type)) +
+  geom_line() +
+  facet_wrap(~site, ncol = 1)
+
+monthly <- daily |>
+  bind_rows(cmip6) |>
+  filter(between(t, dates$freq[1], dates$freq[2])) |>
+  mutate(
+    "year" = year(t),
+    "month" = month(t)
+  ) |>
+  group_by(site, type, year, month) |>
+  summarize(
+    "temp" = mean(temp),
+    .groups = "drop"
+  ) |>
+  mutate(
+    "t" = make_date(year, month),
+  ) |>
+  select(t, site, type, temp)
+  
+monthly |>
+  ggplot(aes(x = t, y = temp, col = type)) +
+  geom_line() +
+  facet_wrap(~site, ncol = 1)
+```
+
+## Decomposing Temeprature Time Series
+
+```{r}
+hourly_filtered <- hourly |>
+  group_by(site, type) |>
+  mutate(
+    "seas" = smooth.spline(temp, nknots = 16)$y,
+    "anomaly" = temp - seas,
+    "met" = freq_filter(anomaly, 1, 1/48, type = "lowpass"),
+    "tidal" = anomaly - met
+  ) |>
+  ungroup()
+
+daily_filtered <- daily |>
+  group_by(site, type) |>
+  mutate(
+    "seas" = smooth.spline(temp, nknots = 16)$y,
+    "anomaly" = temp - seas,
+    "met" = freq_filter(anomaly, 1, 1/2, type = "lowpass"),
+    "tidal" = anomaly - met
+  ) |>
+  ungroup()
+```
+
+## Combining Hourly, Daily, and Monthly Data
+
+```{r}
+all_scales_filtered <- bind_rows(
+  hourly_filtered |>
+    pivot_longer(
+      c(temp, seas, anomaly, met, tidal),
+      names_to = "band",
+      values_to = "band_temp"
+    ) |>
+    mutate("scale" = "hourly"),
+  daily_filtered |>
+    filter(type == "GLORYS") |>
+    select(-tidal) |>
+    mutate("t" = as.POSIXct(t, tz = "UTC")) |>
+    pivot_longer(
+      c(temp, seas, anomaly, met),
+      names_to = "band",
+      values_to = "band_temp"
+    ) |>
+    mutate("scale" = "daily"),
+  monthly |>
+    filter(type == "CMIP6") |>
+    mutate("t" = as.POSIXct(t, tz = "UTC")) |>
+    pivot_longer(
+      c(temp),
+      names_to = "band",
+      values_to = "band_temp"
+    ) |>
+    mutate("scale" = "monthly")
+)
+```
+
+# Plotting Raw Temperatures and Seasonal Cycles
+
+```{r}
+all_scales_filtered |>
+  filter(band %in% c("temp", "seas")) |>
+  mutate(type = factor(type, levels = c("OBS", "FVCOM", "FVCOM2", "GLORYS", "CMIP6"))) |>
+  mutate(band = factor(band, levels = c("temp", "seas"))) |>
+  ggplot(aes(x = t, y = band_temp, col = band, lwd = band)) +
+  geom_line() +
+  facet_grid(type ~ site, 
+             labeller = as_labeller(c("FVCOM" = "FVCOMv1",
+                                      "FVCOM2" = "FVCOMv2",
+                                      "OBS" = "Observations",
+                                      "GLORYS" = "GLORYS12v1",
+                                      "CMIP6" = "CMIP6",
+                                      "Port L'Hebert" = "Port L'Hebert",
+                                      "Taylor's Head" = "Taylor's Head"))) +
+  scale_color_manual(
+    name = "",
+    values = c("black", "blue"),
+    breaks = c("temp", "seas"),
+    labels = c("Observations", "Seasonal Cycle")
+  ) +
+  scale_linewidth_manual(
+    name = "",
+    values = c(0.5, 0.8),
+    breaks = c("temp", "seas"),
+    labels = c("Observations", "Seasonal Cycle")
+  ) +
+  #scale_y_continuous(
+  #  breaks = c(0, 10, 20)
+  #) +
+  labs(
+    x = "Time",
+    y = "Temperature [\u00B0C]"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12)
+  )
+```
+
+# Plotting Raw Temperature Histograms
+
+```{r}
+hourly |>
+  mutate(type = factor(type, levels = c("OBS", "FVCOM", "FVCOM2"))) |>
+  ggplot(aes(x = temp)) +
+  geom_histogram(bins = 40, col = "black", fill = "grey") +
+  facet_grid(type ~ site, 
+             labeller = as_labeller(c("FVCOM" = "FVCOMv1",
+                                      "FVCOM2" = "FVCOMv2",
+                                      "OBS" = "Observations",
+                                      "Port L'Hebert" = "Port L'Hebert",
+                                      "Taylor's Head" = "Taylor's Head"))) +
+  theme_bw() +
+  labs(
+    title = "Histogram of Temperature Data",
+    x = "",
+    y = "Temperature [\u00B0C]"
+  )
+```
+
+# Plotting Temperature Anomalies
+
+```{r}
+all_scales_filtered |>
+  filter(band == "anomaly") |>
+  filter(type != "CMIP6") |>
+  mutate(type = factor(type, levels = c("OBS", "FVCOM", "FVCOM2", "GLORYS"))) |>
+  ggplot(aes(x = t, y = band_temp)) +
+  geom_line(col = "black") +
+  facet_grid(type ~ site, 
+             labeller = as_labeller(c("FVCOM" = "FVCOMv1",
+                                      "FVCOM2" = "FVCOMv2",
+                                      "OBS" = "Observations",
+                                      "GLORYS" = "GLORYS12v1",
+                                      "CMIP6" = "CMIP6",
+                                      "Port L'Hebert" = "Port L'Hebert",
+                                      "Taylor's Head" = "Taylor's Head"))) +
+  labs(
+    title = "",
+    x = "Time",
+    y = "Temperature [\u00B0C]"
+  ) +
+  theme_bw() +
+    theme(
+    strip.text = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12)
+  )
+```
+
+# Converting to Wide Dataframes
+
+```{r}
+ph_hourly_wide <- hourly |>
+  filter(site == "Port L'Hebert") |>
+  pivot_wider(
+    names_from = type,
+    values_from = temp
+  )
+
+ph_daily_wide <- daily |>
+  filter(site == "Port L'Hebert") |>
+  pivot_wider(
+    names_from = type,
+    values_from = temp
+  )
+
+ph_monthly_wide <- monthly |>
+  filter(site == "Port L'Hebert") |>
+  pivot_wider(
+    names_from = type,
+    values_from = temp
+  ) |>
+  drop_na()
+
+th_hourly_wide <- hourly |>
+  filter(site == "Taylor's Head") |>
+  pivot_wider(
+    names_from = type,
+    values_from = temp
+  )
+
+th_daily_wide <- daily |>
+  filter(site == "Taylor's Head") |>
+  pivot_wider(
+    names_from = type,
+    values_from = temp
+  )
+
+th_monthly_wide <- monthly |>
+  filter(site == "Taylor's Head") |>
+  pivot_wider(
+    names_from = type,
+    values_from = temp
+  ) |>
+  drop_na()
+```
+
+# Calculating Traditional Metrics
+
+```{r}
+left_join(
+  apply_metrics(
+    ph_hourly_wide$OBS,
+    ph_hourly_wide$FVCOM,
+    pred_label = "FVCOMv1",
+    metric_funcs = list(bias, aae, mse, rmse, cor, willmott, nse),
+    metric_labels = c("B", "AAE", "MSE", "RMSE", "R", "WS", "NSE")
+  ),
+  apply_metrics(
+    ph_hourly_wide$OBS,
+    ph_hourly_wide$FVCOM2,
+    pred_label = "FVCOMv2",
+    metric_funcs = list(bias, aae, mse, rmse, cor, willmott, nse),
+    metric_labels = c("B", "AAE", "MSE", "RMSE", "R", "WS", "NSE")
+  ),
+  by = "metric"
+) |>
+  mutate(across(where(is.numeric), ~ round(.x, 3)))
+
+left_join(
+  apply_metrics(
+    th_hourly_wide$OBS,
+    th_hourly_wide$FVCOM,
+    pred_label = "FVCOMv1",
+    metric_funcs = list(bias, aae, mse, rmse, cor, willmott, nse),
+    metric_labels = c("B", "AAE", "MSE", "RMSE", "R", "WS", "NSE")
+  ),
+  apply_metrics(
+    th_hourly_wide$OBS,
+    th_hourly_wide$FVCOM2,
+    pred_label = "FVCOMv2",
+    metric_funcs = list(bias, aae, mse, rmse, cor, willmott, nse),
+    metric_labels = c("B", "AAE", "MSE", "RMSE", "R", "WS", "NSE")
+  ),
+  by = "metric"
+) |>
+  mutate(across(where(is.numeric), ~ round(.x, 3)))
+
+left_join(
+  apply_metrics(
+    ph_daily_wide$OBS,
+    ph_daily_wide$GLORYS,
+    pred_label = "GLORYS12v1",
+    metric_funcs = list(bias, aae, mse, rmse, cor, willmott, nse),
+    metric_labels = c("B", "AAE", "MSE", "RMSE", "R", "WS", "NSE")
+  ),
+  apply_metrics(
+    ph_monthly_wide$OBS,
+    ph_monthly_wide$CMIP6,
+    pred_label = "CMIP6",
+    metric_funcs = list(bias, aae, mse, rmse, cor, willmott, nse),
+    metric_labels = c("B", "AAE", "MSE", "RMSE", "R", "WS", "NSE")
+  ),
+  by = "metric"
+) |>
+  mutate(across(where(is.numeric), ~ round(.x, 3)))
+
+left_join(
+  apply_metrics(
+    th_daily_wide$OBS,
+    th_daily_wide$GLORYS,
+    pred_label = "GLORYS12v1",
+    metric_funcs = list(bias, aae, mse, rmse, cor, willmott, nse),
+    metric_labels = c("B", "AAE", "MSE", "RMSE", "R", "WS", "NSE")
+  ),
+  apply_metrics(
+    th_monthly_wide$OBS,
+    th_monthly_wide$CMIP6,
+    pred_label = "CMIP6",
+    metric_funcs = list(bias, aae, mse, rmse, cor, willmott, nse),
+    metric_labels = c("B", "AAE", "MSE", "RMSE", "R", "WS", "NSE")
+  ),
+  by = "metric"
+) |>
+  mutate(across(where(is.numeric), ~ round(.x, 3)))
+```
+
+# Plotting Taylor Diagrams
+
+```{r}
+taylor_diagram2(
+  x = cbind(ph_hourly_wide$OBS, th_hourly_wide$OBS), 
+  y = cbind(ph_hourly_wide$FVCOM, ph_hourly_wide$FVCOM2, 
+            th_hourly_wide$FVCOM, th_hourly_wide$FVCOM2), 
+  sd_max = 1.25, 
+  sites = c("Port L'Hebert", "Taylor's Head"), 
+  types = c("Observations", "FVCOMv1", "FVCOMv2"), 
+  print_results = FALSE
+) +
+  scale_color_manual(
+    name = "",
+    values = c("black", pal[1:2]),
+    breaks = c("Observations", "FVCOMv1", "FVCOMv2"),
+    labels = c("Observations", "FVCOMv1", "FVCOMv2")
+  ) +
+  scale_x_continuous(
+      name = "Normalized standard deviation",
+      limits = c(0,1),
+      breaks = c(0, 0.2, 0.4, 0.6, 0.8, 1),
+      labels = c(" R = 0", " R = 0.2", " R = 0.4",
+                 " R = 0.6", " R = 0.8", " R = 1")
+  ) +
+  theme(
+    legend.position = "bottom",
+    strip.text = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12),
+    legend.text = element_text(size = 12)
+  )
+
+taylor_diagram2(
+  x = cbind(ph_monthly_wide$OBS, th_monthly_wide$OBS), 
+  y = cbind(ph_monthly_wide$FVCOM, ph_monthly_wide$FVCOM2,
+            ph_monthly_wide$GLORYS, ph_monthly_wide$CMIP6,
+            th_monthly_wide$FVCOM, th_monthly_wide$FVCOM2,
+            th_monthly_wide$GLORYS, th_monthly_wide$CMIP6),
+  sd_max = 1.25, 
+  sites = c("Port L'Hebert", "Taylor's Head"), 
+  types = c("Observations", "FVCOMv1", "FVCOMv2", "GLORYS12v1", "CMIP6"), 
+  print_results = FALSE
+) +
+  scale_color_manual(
+    name = "",
+    values = c("black", pal[1:4]),
+    breaks = c("Observations", "FVCOMv1", "FVCOMv2", "GLORYS12v1", "CMIP6"),
+    labels = c("Observations", "FVCOMv1", "FVCOMv2", "GLORYS12v1", "CMIP6")
+  ) +
+  scale_shape_manual(
+    name = "",
+    values = c(16, 17, 15, 18, 7),
+    breaks = c("Observations", "FVCOMv1", "FVCOMv2", "GLORYS12v1", "CMIP6"),
+    labels = c("Observations", "FVCOMv1", "FVCOMv2", "GLORYS12v1", "CMIP6")
+  ) +
+  scale_x_continuous(
+      name = "Normalized standard deviation",
+      limits = c(0,1),
+      breaks = c(0, 0.2, 0.4, 0.6, 0.8, 1),
+      labels = c(" R = 0", " R = 0.2", " R = 0.4",
+                 " R = 0.6", " R = 0.8", " R = 1")
+  ) +
+  theme(
+    legend.position = "bottom",
+    strip.text = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12),
+    legend.text = element_text(size = 12)
+  )
+```
+

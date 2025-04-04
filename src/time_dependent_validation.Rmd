@@ -1,0 +1,520 @@
+---
+title: "Time-Dependent Validation"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+# Code setup
+
+Loading libraries and functions, reading and preprocessing data.
+
+```{r, warning = FALSE, message = FALSE}
+library(tidyverse)
+library(heatwaveR)
+library(ncdf4)
+library(R.matlab)
+#library(patchwork)
+#library(logKDE)
+```
+
+```{r}
+read_data = FALSE
+process = "sst"
+sites <- c("Port l'Hebert", "Taylor's Head Shallow")
+site_labels <- c("Port L'Hebert", "Taylor's Head")
+pal <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442")
+source("setup.R")
+```
+
+# Reading CMIP6
+
+```{r}
+ph_cmip6 <- readCMIP6("../data/Port_LHebert/cmip6_2000_to_2024.mat")
+th_cmip6 <- readCMIP6("../data/TaylorHead/cmip6_2000_to_2024.mat")
+
+ph_cmip6 <- ph_cmip6 |>
+  mutate("site" = "Port L'Hebert")
+th_cmip6 <- th_cmip6 |>
+  mutate("site" = "Taylor's Head")
+cmip6 <- bind_rows(ph_cmip6, th_cmip6) |>
+  mutate("type" = "CMIP6") |>
+  select("t" = time, site, type, temp)
+```
+
+# Processing Data
+
+Filtering between May 28th, 2018 to March 20th, 2020.
+
+```{r}
+hourly <- hourly_dataframe |>
+  filter(between(time, dates$freq[1], dates$freq[2])) |>
+  select(-GLORYS) |>
+  rename("t" = time) |>
+  pivot_longer(
+    c(OBS, FVCOM, FVCOM2),
+    names_to = "type",
+    values_to = "temp"
+  ) |>
+  remove_missing_times()
+
+daily <- daily_dataframe |>
+  filter(between(time, dates$freq[1], dates$freq[2])) |>
+  rename("t" = time) |>
+  pivot_longer(
+    c(OBS, FVCOM, FVCOM2, GLORYS),
+    names_to = "type",
+    values_to = "temp"
+  ) |>
+  remove_missing_times()
+
+monthly <- daily |>
+  bind_rows(cmip6) |>
+  filter(between(t, dates$freq[1], dates$freq[2])) |>
+  mutate(
+    "year" = year(t),
+    "month" = month(t)
+  ) |>
+  group_by(site, type, year, month) |>
+  summarize(
+    "temp" = mean(temp),
+    .groups = "drop"
+  ) |>
+  mutate(
+    "t" = make_date(year, month),
+  ) |>
+  select(t, site, type, temp)
+```
+
+## Decomposing Temeprature Time Series
+
+```{r}
+hourly_filtered <- hourly |>
+  group_by(site, type) |>
+  mutate(
+    "seas" = smooth.spline(temp, nknots = 16)$y,
+    "anomaly" = temp - seas,
+    "met" = freq_filter(anomaly, 1, 1/48, type = "lowpass"),
+    "tidal" = anomaly - met
+  ) |>
+  ungroup()
+
+daily_filtered <- daily |>
+  group_by(site, type) |>
+  mutate(
+    "seas" = smooth.spline(temp, nknots = 16)$y,
+    "anomaly" = temp - seas,
+    "met" = freq_filter(anomaly, 1, 1/2, type = "lowpass"),
+    "tidal" = anomaly - met
+  ) |>
+  ungroup()
+```
+
+# Calculating Evolutionary Metrics
+
+## Constructing Dataframe
+
+```{r}
+evolutionary_filtered <- bind_rows(
+  hourly_filtered |>
+    select(t, site, type, temp) |>
+    pivot_wider(
+      names_from = type,
+      values_from = temp
+    ) |>
+    pivot_longer(
+      c(FVCOM, FVCOM2),
+      names_to = "type",
+      values_to = "temp"
+    ),
+  daily_filtered |>
+    filter(type %in% c("OBS", "GLORYS")) |>
+    select(t, site, type, temp) |>
+    mutate(t = as_datetime(t)) |>
+    pivot_wider(
+      names_from = type,
+      values_from = temp
+    ) |>
+    pivot_longer(
+      c(GLORYS),
+      names_to = "type",
+      values_to = "temp"
+    )
+) |>
+  mutate(type = factor(type, levels = c("FVCOM", "FVCOM2", "GLORYS")))
+```
+
+# Overall Bias (FVCOM models)
+
+```{r}
+evolutionary_filtered |>
+  filter(type != "GLORYS") |>
+  group_by(site, type) |>
+  reframe(
+    "time" = evolutionary_metrics(t, OBS, temp, bias)$t,
+    "metric" = evolutionary_metrics(t, OBS, temp, bias)$metric
+  ) |>
+  mutate("month" = factor(month(time) %in% c(5, 6, 7, 8, 9, 10))) |>
+  ggplot(aes(x = time, y = metric)) +
+  geom_line() +
+  geom_hline(aes(yintercept = 0), lty = 2) +
+  geom_point(aes(col = month)) +
+  scale_color_manual(
+    name = "",
+    values = c("blue", "red"),
+    breaks = c("FALSE", "TRUE"),
+    labels = c("Winter", "Summer")
+  ) +
+  facet_grid(type ~ site, 
+             labeller = as_labeller(c("FVCOM" = "FVCOMv1",
+                                      "FVCOM2" = "FVCOMv2",
+                                      "Port L'Hebert" = "Port L'Hebert",
+                                      "Taylor's Head" = "Taylor's Head"))) +
+  theme_bw() +
+  labs(
+    title = "",
+    x = "Time",
+    y = "B"
+  ) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12)
+  )
+```
+
+## RMSE (FVCOM models)
+
+```{r}
+evolutionary_filtered |>
+  filter(type != "GLORYS") |>
+  group_by(site, type) |>
+  reframe(
+    "time" = evolutionary_metrics(t, OBS, temp, rmse)$t,
+    "metric" = evolutionary_metrics(t, OBS, temp, rmse)$metric
+  ) |>
+  mutate("month" = factor(month(time) %in% c(5, 6, 7, 8, 9, 10))) |>
+  ggplot(aes(x = time, y = metric)) +
+  geom_line() +
+  geom_point(aes(col = month)) +
+  scale_color_manual(
+    name = "",
+    values = c("blue", "red"),
+    breaks = c("FALSE", "TRUE"),
+    labels = c("Winter", "Summer")
+  ) +
+  facet_grid(type ~ site, 
+             labeller = as_labeller(c("FVCOM" = "FVCOMv1",
+                                      "FVCOM2" = "FVCOMv2",
+                                      "Port L'Hebert" = "Port L'Hebert",
+                                      "Taylor's Head" = "Taylor's Head"))) +
+  theme_bw() +
+  labs(
+    title = "",
+    x = "Time",
+    y = "RMSE"
+  ) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12)
+  )
+```
+
+## Correlation Coefficient (FVCOM models)
+
+```{r}
+evolutionary_filtered |>
+  filter(type != "GLORYS") |>
+  group_by(site, type) |>
+  reframe(
+    "time" = evolutionary_metrics(t, OBS, temp, r)$t,
+    "metric" = evolutionary_metrics(t, OBS, temp, r)$metric
+  ) |>
+  mutate("month" = factor(month(time) %in% c(5, 6, 7, 8, 9, 10))) |>
+  ggplot(aes(x = time, y = metric)) +
+  geom_line() +
+  geom_point(aes(col = month)) +
+  scale_color_manual(
+    name = "",
+    values = c("blue", "red"),
+    breaks = c("FALSE", "TRUE"),
+    labels = c("Winter", "Summer")
+  ) +
+  facet_grid(type ~ site, 
+             labeller = as_labeller(c("FVCOM" = "FVCOMv1",
+                                      "FVCOM2" = "FVCOMv2",
+                                      "Port L'Hebert" = "Port L'Hebert",
+                                      "Taylor's Head" = "Taylor's Head"))) +
+  theme_bw() +
+  labs(
+    title = "",
+    x = "Time",
+    y = "R"
+  ) +
+  theme(
+    legend.position = "none"
+  ) +
+  theme(
+    legend.position = "inside",
+    legend.position.inside = c(0.9, 0.15),
+    legend.background = element_blank(),
+    legend.text = element_text(size = 12),
+    strip.text = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12)
+  ) +
+  guides(col = guide_legend(override.aes = list(size = 3)))
+```
+
+## Willmott Skill (FVCOM models)
+
+```{r}
+evolutionary_filtered |>
+  filter(type != "GLORYS") |>
+  group_by(site, type) |>
+  reframe(
+    "time" = evolutionary_metrics(t, OBS, temp, willmott)$t,
+    "metric" = evolutionary_metrics(t, OBS, temp, willmott)$metric
+  ) |>
+  mutate("month" = factor(month(time) %in% c(5, 6, 7, 8, 9, 10))) |>
+  ggplot(aes(x = time, y = metric)) +
+  geom_line() +
+  geom_point(aes(col = month)) +
+  scale_color_manual(
+    name = "",
+    values = c("blue", "red"),
+    breaks = c("FALSE", "TRUE"),
+    labels = c("Winter", "Summer")
+  ) +
+  facet_grid(type ~ site, 
+             labeller = as_labeller(c("FVCOM" = "FVCOMv1",
+                                      "FVCOM2" = "FVCOMv2",
+                                      "Port L'Hebert" = "Port L'Hebert",
+                                      "Taylor's Head" = "Taylor's Head"))) +
+  theme_bw() +
+  labs(
+    title = "",
+    x = "Time",
+    y = "WS"
+  ) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12)
+  )
+```
+
+## Evolutionary RMSE for Specific Bands (Port L'Hebert) 
+
+```{r}
+hourly_filtered |>
+  filter(site == "Port L'Hebert") |>
+  select(t, type, seas, met, tidal) |>
+  pivot_longer(
+    c(seas, met, tidal),
+    names_to = "band",
+    values_to = "temp"
+  ) |>
+  pivot_wider(
+    names_from = type,
+    values_from = temp
+  ) |>
+  pivot_longer(
+    c(FVCOM, FVCOM2),
+    names_to = "type",
+    values_to = "temp"
+  ) |>
+  group_by(type, band) |>
+  reframe(
+    "time" = evolutionary_metrics(t, OBS, temp, rmse)$t,
+    "rmse" = evolutionary_metrics(t, OBS, temp, rmse)$metric
+  ) |>
+  mutate(
+    "month" = factor(month(time) %in% c(5, 6, 7, 8, 9, 10))
+  ) |>
+  mutate(type = factor(type, levels = c("FVCOM", "FVCOM2"))) |>
+  mutate(band = factor(band, levels = c("seas", "met", "tidal"))) |>
+  ggplot(aes(x = time, y = rmse)) +
+  geom_line() +
+  geom_point(aes(col = month)) +
+  scale_color_manual(
+    name = "",
+    values = c("blue", "red"),
+    breaks = c("FALSE", "TRUE"),
+    labels = c("Winter", "Summer")
+  ) +
+  facet_grid(band ~ type, 
+             labeller = as_labeller(c("FVCOM" = "FVCOMv1",
+                                      "FVCOM2" = "FVCOMv2",
+                                      "seas" = "Seasonal",
+                                      "met" = "Meteorological",
+                                      "tidal" = "Tidal"))) +
+  labs(
+    title = "",
+    x = "Time",
+    y = "RMSE"
+  ) +
+  theme_bw() +
+  theme(
+    legend.text = element_text(size = 12),
+    strip.text = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12)
+  ) +
+  guides(col = guide_legend(override.aes = list(size = 2)))
+```
+
+## Evolutionary RMSE for Specific Bands (Taylor's Head)
+
+```{r}
+hourly_filtered |>
+  filter(site == "Taylor's Head") |>
+  select(t, type, seas, met, tidal) |>
+  pivot_longer(
+    c(seas, met, tidal),
+    names_to = "band",
+    values_to = "temp"
+  ) |>
+  pivot_wider(
+    names_from = type,
+    values_from = temp
+  ) |>
+  pivot_longer(
+    c(FVCOM, FVCOM2),
+    names_to = "type",
+    values_to = "temp"
+  ) |>
+  group_by(type, band) |>
+  reframe(
+    "time" = evolutionary_metrics(t, OBS, temp, rmse)$t,
+    "rmse" = evolutionary_metrics(t, OBS, temp, rmse)$metric
+  ) |>
+  mutate(
+    "month" = factor(month(time) %in% c(5, 6, 7, 8, 9, 10))
+  ) |>
+  mutate(type = factor(type, levels = c("FVCOM", "FVCOM2"))) |>
+  mutate(band = factor(band, levels = c("seas", "met", "tidal"))) |>
+  ggplot(aes(x = time, y = rmse)) +
+  geom_line() +
+  geom_point(aes(col = month)) +
+  scale_color_manual(
+    name = "",
+    values = c("blue", "red"),
+    breaks = c("FALSE", "TRUE"),
+    labels = c("Winter", "Summer")
+  ) +
+  facet_grid(band ~ type, 
+             labeller = as_labeller(c("FVCOM" = "FVCOMv1",
+                                      "FVCOM2" = "FVCOMv2",
+                                      "seas" = "Seasonal",
+                                      "met" = "Meteorological",
+                                      "tidal" = "Tidal"))) +
+  labs(
+    title = "",
+    x = "Time",
+    y = "RMSE"
+  ) +
+  theme_bw() +
+  theme(
+    legend.text = element_text(size = 12),
+    strip.text = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12)
+  ) +
+  guides(col = guide_legend(override.aes = list(size = 2)))
+```
+
+## Evolutionary Metrics for GLORYS12v1
+
+```{r}
+evolutionary_filtered |>
+  filter(type == "GLORYS") |>
+  group_by(site) |>
+  reframe(
+    "time" = evolutionary_metrics(t, OBS, temp, bias, width = 30, overlap = 15)$t,
+    "bias" = evolutionary_metrics(t, OBS, temp, bias, width = 30, overlap = 15)$metric,
+    "rmse" = evolutionary_metrics(t, OBS, temp, rmse, width = 30, overlap = 15)$metric,
+    "willmott" = evolutionary_metrics(t, OBS, temp, willmott, width = 30, overlap = 15)$metric,
+    "cor" = evolutionary_metrics(t, OBS, temp, r, width = 30, overlap = 15)$metric,
+  ) |>
+  pivot_longer(
+    c(bias, rmse, willmott, cor),
+    names_to = "metric",
+    values_to = "value"
+  ) |>
+  mutate("month" = factor(month(time) %in% c(5, 6, 7, 8, 9, 10))) |>
+  ggplot(aes(x = time, y = value)) +
+  geom_line() +
+  geom_point(aes(col = month)) +
+  scale_color_manual(
+    name = "",
+    values = c("blue", "red"),
+    breaks = c("FALSE", "TRUE"),
+    labels = c("Winter", "Summer")
+  ) +
+  facet_grid(metric ~ site, 
+             labeller = as_labeller(c("bias" = "B",
+                                      "rmse" = "RMSE",
+                                      "willmott" = "WS",
+                                      "cor" = "R",
+                                      "Port L'Hebert" = "Port L'Hebert",
+                                      "Taylor's Head" = "Taylor's Head")),
+             scales = "free") +
+  theme_bw() +
+  labs(
+    title = "",
+    x = "Time",
+    y = "Metric value"
+  ) +
+  theme(
+    legend.position = "right"
+  ) +
+  theme(
+    legend.text = element_text(size = 12),
+    strip.text = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12)
+  ) +
+  guides(col = guide_legend(override.aes = list(size = 2)))
+```
+
+# Spectrograms
+
+```{r}
+hourly_filtered |>
+  group_by(site, type) |>
+  reframe(
+    "time" = evolutionary_spectrum2(t, anomaly)$t,
+    "freq" = evolutionary_spectrum2(t, anomaly)$freq,
+    "power" = evolutionary_spectrum2(t, anomaly)$power
+  ) |>
+  filter(freq < 1/6) |>
+  mutate(type = factor(type, levels = c("OBS", "FVCOM", "FVCOM2"))) |>
+  ggplot(aes(x = time, y = freq, fill = log(power))) +
+  geom_tile() +
+  scale_fill_gradientn(colors = c("darkblue", "blue", "lightblue1",
+                                    "green", "yellow", "red", "darkred"),
+                       name = "Log power") +
+  facet_grid(type ~ site, 
+             labeller = as_labeller(c("FVCOM" = "FVCOMv1",
+                                      "FVCOM2" = "FVCOMv2",
+                                      "OBS" = "Observations",
+                                      "Port L'Hebert" = "Port L'Hebert",
+                                      "Taylor's Head" = "Taylor's Head"))) +
+  labs(
+    x = "Time",
+    y = "Frequency (1/hour)",
+    title = ""
+  ) +
+  theme_bw() +
+  theme(
+    legend.text = element_text(size = 12),
+    strip.text = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12)
+  )
+```

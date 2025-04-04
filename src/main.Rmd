@@ -1,0 +1,681 @@
+---
+title: "Main Thesis Code"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+# Code setup
+
+Loading libraries and functions, reading and preprocessing data.
+
+```{r, warning = FALSE, message = FALSE}
+library(tidyverse)
+library(heatwaveR)
+library(ncdf4)
+library(R.matlab)
+library(patchwork)
+#library(logKDE)
+```
+
+```{r}
+read_data = FALSE
+process = "sst"
+sites <- c("Port l'Hebert", "Taylor's Head Shallow")
+site_labels <- c("Port L'Hebert", "Taylor's Head")
+pal <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442")
+source("setup.R")
+```
+
+# Example Taylor Diagram
+
+```{r}
+set.seed(724719)
+n <- 150
+a <- 3
+b <- 4.7
+f <- 1/5
+t <- seq(-5, 15, length.out = n)
+X <- a*cos(2*pi*f*t) + b*cos(2*pi*f*t)
+
+Y1 <- X + rnorm(n, sd = 1)
+Y2 <- X + rnorm(n, sd = 3)
+Y3 <- c(rep(0, 7), Y1[1:(n-7)])
+
+data <- tibble(
+  t = t,
+  X = X,
+  Y1 = Y1,
+  Y2 = Y2,
+  Y3 = Y3
+) |>
+  pivot_longer(
+    c(Y1, Y2, Y3),
+    names_to = "type",
+    values_to = "value"
+  ) |>
+  mutate(
+    type = factor(type, labels = c("Time Series 1", "Time Series 2", "Time Series 3"))
+  ) |>
+  filter(between(t, 0, 10))
+
+data |>
+  ggplot(aes(x = t, y = X)) +
+  geom_line(lwd = 0.7) +
+  geom_line(aes(y = value, col = type), lwd = 0.7) +
+  facet_wrap(~type, ncol = 1) +
+  labs(
+    x = "Time",
+    y = "Output variable",
+    title = ""
+  ) +
+  scale_color_manual(
+    name = "",
+    values = pal[1:3]
+  ) +
+  scale_y_continuous(
+    breaks = c(-10, 0, 10)
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    axis.text = element_text(size = 13),
+    axis.title.x = element_text(size = 13),
+    axis.title.y = element_text(size = 13),
+    strip.text = element_text(size = 13)
+  )
+
+taylor_diagram(X, cbind(Y1, Y2, Y3), sd_max = 1.5, 
+               labels = c("Reference", "Time Series 1", 
+                          "Time Series 2", "Time Series 3"),
+               print_results = TRUE) +
+  labs(
+    title = ""
+  ) +
+  scale_color_manual(
+    name = "",
+    values = c("black", pal[1:3]),
+    breaks = c("Reference", "Time Series 1", "Time Series 2", "Time Series 3"),
+    labels = c("Reference", "Time Series 1", "Time Series 2", "Time Series 3")
+  ) +
+  scale_shape_manual(
+    name = "",
+    values = c(16, 15, 17, 18),
+    breaks = c("Reference", "Time Series 1", "Time Series 2", "Time Series 3"),
+    labels = c("Reference", "Time Series 1", "Time Series 2", "Time Series 3")
+  ) + 
+  scale_x_continuous(
+      name = "Normalized standard deviation",
+      limits = c(0,1),
+      breaks = c(0, 0.2, 0.4, 0.6, 0.8, 1),
+      labels = c(" R = 0", " R = 0.2", " R = 0.4",
+                 " R = 0.6", " R = 0.8", " R = 1")
+    ) +
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size = 13),
+    axis.text = element_text(size = 13),
+    axis.title.x = element_text(size = 13)
+  )
+
+rm("n", "a", "b", "f", "t", "X", "Y1", "Y2", "Y3", "data")
+```
+
+
+# Plotting temperature site locations
+
+```{r}
+coastline <- read.csv("../data/ns_coastline.csv", header=T)
+stations <- tibble(
+  name = c("Port L'Hebert", "Taylor's Head"),
+  lat = c(43.86807, 44.82017),
+  lon = c(-64.9633, -62.5726),
+  depth_high_tide = c(1.7, 3.2),
+)
+
+full_xlims <- c(-65.5, -61.5)
+full_y <- 44.3
+full_x_width <- full_xlims[2] - full_xlims[1]
+full_y_halfwidth <- full_x_width / 2 / 1.41
+
+ph_x <- stations$lon[stations$name == "Port L'Hebert"]
+ph_y <- 43.8
+ph_halfwidth <- 0.25
+ph_lat_halfwidth <- ph_halfwidth / 1.41
+
+th_x <- stations$lon[stations$name == "Taylor's Head"]
+th_y <- stations$lat[stations$name == "Taylor's Head"]
+th_halfwidth <- 0.2
+th_lat_halfwidth <- th_halfwidth / 1.41
+
+coastline |>
+  ggplot(aes(x = lon, y = lat)) +
+  geom_polygon(fill = "lightgrey", color = "black", linewidth = 0.4, na.rm = TRUE) +
+  coord_cartesian(xlim = full_xlims, 
+                  ylim = c(full_y - full_y_halfwidth, full_y + full_y_halfwidth)) +
+  geom_point(data = stations, aes(color = name), size = 5) +
+  scale_x_continuous(labels = ~ paste0(.x, "\u00B0")) +
+  scale_y_continuous(labels = ~ paste0(.x, "\u00B0")) +
+  labs(
+    title = "",
+    x = "Longitude",
+    y = "Latitude",
+    color = ""
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "inside",
+    legend.position.inside = c(0.85, 0.15),
+    axis.text.x = element_text(size = 14),
+    axis.text.y = element_text(size = 14),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    legend.text = element_text(size = 14)
+  ) +
+  scale_color_manual(
+    name = "",
+    values = pal2[1:2],
+    breaks = c("Port L'Hebert", "Taylor's Head")
+  )
+
+coastline |>
+  ggplot(aes(x = lon, y = lat)) +
+  geom_polygon(fill = "lightgrey", color = "black", linewidth = 0.4, na.rm = TRUE) +
+  coord_cartesian(xlim = c(ph_x - ph_halfwidth, ph_x + ph_halfwidth), 
+                  ylim = c(ph_y - ph_lat_halfwidth, ph_y + ph_lat_halfwidth)) +
+  geom_point(data = filter(stations, name == "Port L'Hebert"), aes(color = name), size = 5) +
+  scale_x_continuous(labels = ~ paste0(.x, "\u00B0")) +
+  scale_y_continuous(labels = ~ paste0(.x, "\u00B0")) +
+  labs(
+    title = "",
+    x = "Longitude",
+    y = "Latitude",
+    color = ""
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "inside",
+    legend.position.inside = c(0.85, 0.15),
+    axis.text.x = element_text(size = 14),
+    axis.text.y = element_text(size = 14),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    legend.text = element_text(size = 14)
+  ) +
+  scale_color_manual(
+    name = "",
+    values = pal[1]
+  )
+
+coastline |>
+  ggplot(aes(x = lon, y = lat)) +
+  geom_polygon(fill = "lightgrey", color = "black", linewidth = 0.4, na.rm = TRUE) +
+  coord_cartesian(xlim = c(th_x - th_halfwidth, th_x + th_halfwidth), 
+                  ylim = c(th_y - th_lat_halfwidth, th_y + th_lat_halfwidth)) +
+  geom_point(data = filter(stations, name == "Taylor's Head"), aes(color = name), size = 5) +
+  scale_x_continuous(labels = ~ paste0(.x, "\u00B0")) +
+  scale_y_continuous(labels = ~ paste0(.x, "\u00B0")) +
+  labs(
+    title = "",
+    x = "Longitude",
+    y = "Latitude",
+    color = ""
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "inside",
+    legend.position.inside = c(0.85, 0.15),
+    axis.text.x = element_text(size = 14),
+    axis.text.y = element_text(size = 14),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    legend.text = element_text(size = 14)
+  ) +
+  scale_color_manual(
+    name = "",
+    values = pal[2]
+  )
+
+# 630,410
+rm("full_xlims", "full_y", "full_x_width", "full_y_halfwidth",
+   "ph_x", "ph_y", "ph_halfwidth", "ph_lat_halfwidth",
+   "th_x", "th_y", "th_halfwidth", "th_lat_halfwidth")
+```
+
+# Plotting temperature observations
+
+```{r}
+start_time <- ymd_hms("2019-06-01 00:00:00")
+end_time <- ymd_hms("2019-07-31 23:00:00")
+
+hourly_data$obs |>
+  ggplot(aes(x = t, y = temp, col = site)) +
+  geom_line(na.rm = TRUE) +
+  annotate("rect", xmin = start_time, xmax = end_time, ymin = -Inf, ymax = Inf,
+        alpha = .2) +
+  geom_vline(aes(xintercept = start_time), lty = 2) +
+  geom_vline(aes(xintercept = end_time), lty = 2) +
+  facet_wrap(~site, ncol = 1) +
+  scale_color_manual(
+    name = "",
+    values = pal[1:2],
+    breaks = c("Port L'Hebert", "Taylor's Head"),
+    labels = c("Port L'Hebert", "Taylor's Head")
+  ) +
+  labs(
+    x = "Time",
+    y = "Temperature [\u00B0C]",
+    title = ""
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12),
+    strip.text = element_text(size = 12),
+  )
+
+hourly_data$obs |>
+  filter(year(t) == 2019) |>
+  filter(month(t) %in% c(6, 7)) |>
+  ggplot(aes(x = t, y = temp, col = site)) +
+  geom_line(lwd = 0.7) +
+  scale_color_manual(
+    name = "",
+    values = pal[1:2],
+    breaks = c("Port L'Hebert", "Taylor's Head"),
+    labels = c("Port L'Hebert", "Taylor's Head")
+  ) +
+  labs(
+    x = "Time",
+    y = "Temperature [\u00B0C]",
+    title = "",
+    col = ""
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size = 12),
+    legend.key.width = unit(2, "cm"),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12)
+  ) +
+  guides(col = guide_legend(override.aes = list(lwd = 1.2)))
+```
+
+# Plotting frequency filter example
+
+```{r}
+n <- 100
+f1 <- 4/100
+f2 <- 30/100
+f3 <- 20/100
+A1 <- 7
+B1 <- 8
+A2 <- 4
+B2 <- 3
+A3 <- 2
+B3 <- 3
+
+t <- 1:n
+x1 <- A1*cos(2*pi*f1*t) + B1*sin(2*pi*f1*t)
+x2 <- A2*cos(2*pi*f2*t) + B2*sin(2*pi*f2*t)
+x3 <- A3*cos(2*pi*f3*t) + B3*sin(2*pi*f3*t)
+x <- x1 + x2 + x3
+
+inverse_transform <- function(fft, n) {
+  rev_fft <- c(fft, rev(Conj(fft[2:(n/2)])))
+  Re(fft(rev_fft, inverse = TRUE)) / sqrt(n)
+}
+
+periodogram <- tibble(
+  "freq" = (1/n)*(0:(n/2)),
+  "original" = (1/sqrt(n))*fft(x)[1:(n/2+1)],
+  "filtered" = if_else(freq %in% c(f2, f3), 0, original)
+)
+
+ts <- tibble(
+  "t" = t, 
+  "original" = x,
+  "filtered" = inverse_transform(periodogram$filtered, n)
+)
+
+ts |>
+  pivot_longer(
+    c(original, filtered),
+    names_to = "type",
+    values_to = "X"
+  ) |>
+  mutate(type = factor(type, levels = c("original", "filtered"),
+                       labels = c("Original", "Filtered"))) |>
+  ggplot(aes(x = t, y = X)) +
+  geom_line(lwd = 0.7) +
+  facet_wrap(~type, ncol = 1) +
+  labs(
+    x = "Time",
+    y = "X"
+  ) +
+  theme_bw() +
+  theme(
+    strip.text = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12)
+  )
+
+periodogram |>
+  pivot_longer(
+    c(original, filtered),
+    names_to = "type",
+    values_to = "fft"
+  ) |>
+  mutate(type = factor(type, levels = c("original", "filtered"),
+                       labels = c("Original", "Filtered"))) |>
+  ggplot(aes(x = freq, y = abs(fft)^2)) +
+  geom_line(lwd = 0.7) +
+  geom_point() +
+  facet_wrap(~type, ncol = 1) +
+  labs(
+    x = "Frequency",
+    y = "Power"
+  ) +
+  theme_bw() +
+  theme(
+    strip.text = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12)
+  )
+
+rm("n", "f1", "f2", "A1", "B1", "A2", "B2", "t", "x", "x1", "x2",
+   "ts", "periodogram")
+```
+
+# Plotting BM and POT approaches
+
+```{r}
+# Setting seed
+set.seed(826419)
+
+# Initializing parameters
+N <- 100
+n <- 10
+df <- 4
+
+# Simulating data
+X <- rt(N, df = df)
+top <- max(X) + 0.5
+bottom <- min(X) - 0.5
+
+X_bm <- tibble(
+  "x" = X,
+  "ind" = 1:N,
+  "block" = rep(1:(N/n), each = n),
+  "line" = FALSE
+) |>
+  group_by(block) |>
+  mutate(
+    "max" = x == max(x)
+  ) |>
+  ungroup() |>
+  add_row(
+    "ind" = n*(0:(N/n)) + 0.5,
+    "line" = TRUE
+  )
+
+thresh <- 1.2
+X_pot <- tibble(
+  "x" = X,
+  "ind" = 1:N,
+  "exceed" = x > thresh,
+  "thresh" = thresh
+)
+
+X_bm |>
+  ggplot(aes(x = ind, y = x)) +
+  geom_line(data = filter(X_bm, !line)) +
+  geom_segment(data = filter(X_bm, line), aes(x = ind, xend = ind, 
+                                              y = Inf, yend = -Inf), 
+               lty = 2, alpha = 0.7) +
+  geom_point(data = filter(X_bm, max), size = 3, color = "red") +
+  labs(
+    title = "",
+    x = "Time",
+    y = "X"
+  ) +
+  scale_x_continuous(
+    name = "Time",
+    breaks = n*(0:(N/n)) + 0.5,
+    labels = c("", rep("n", n))
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(hjust = 4),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12)
+  )
+
+X_pot |>
+  ggplot(aes(x = ind, y = x)) +
+  geom_line() +
+  geom_hline(aes(yintercept = thresh), lty = 2, alpha = 0.7) +
+  geom_point(data = filter(X_pot, exceed), size = 3, color = "red") +
+  labs(
+    title = "",
+    x = "Time",
+    y = "X",
+  ) +
+  theme_bw() +
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12)
+  )
+```
+
+# Illustration of Declustering
+```{r}
+set.seed(861937)
+n <- 200
+start_ind <- 100
+
+phi <- 0.65
+sig <- sqrt((df / (df - 2)) * (1 - phi))
+
+X <- rep(NA, n)
+X[1] <- 0
+for (i in 2:n) {
+  X[i] <- phi*X[i-1] + rnorm(1, mean = 0, sd = sig)
+}
+X <- X[(start_ind+1):n]
+X[5] <- X[5] + 0.1
+
+X_clm <- tibble(
+  "t" = ymd("2020-01-01") + 1:(n - start_ind),
+  "temp" = X,
+  "seas" = 1.2,
+  "thresh" = 1.2
+) |>
+  detect_events(min_duration = 1, max_gap = 2)
+
+X_clm |>
+  ggplot(aes(x = t, y = temp)) +
+  geom_line() +
+  geom_line(aes(y = thresh), lty = 2, alpha = 0.7) +
+  geom_point(data = filter(X_clm, temp > thresh), size = 3, color = "red") +
+  labs(
+    title = "POT Approach with AR(1) Data",
+    y = "X",
+  ) +
+  scale_x_continuous(
+    name = "",
+    labels = NULL
+  ) +
+  theme_bw()
+
+X_exceedances <- X_clm |>
+  plot_exceedances() +
+  labs(
+    y = "X",
+    title = "Exceedances Above Threshold"
+  ) +
+  theme(axis.text.x = element_blank()) +
+  coord_cartesian(xlim = as_datetime(c(ymd("2020-01-01"), ymd("2020-01-01") + n - start_ind)))
+
+X_declustered <- X_clm |>
+  calculate_events(funcs = event_funcs, target_col = "exceedance") |>
+  plot_event_metric(ind = "date_peak", metric = "exceedance_max") +
+  labs(
+    y = "X",
+    title = "Declustered Exceedances"
+  ) +
+  theme(axis.text.x = element_blank()) +
+  coord_cartesian(xlim = c(ymd("2020-01-01"), ymd("2020-01-01") + n - start_ind))
+
+X_exceedances / X_declustered
+
+rm("N", "n", "df", "X", "top", "bottom", "thresh", "X_bm", "X_pot", 
+   "start_ind", "phi", "sig", "X_clm", "X_exceedances", "X_declustered")
+```
+
+
+# Visualizing MHW Climatologies
+
+```{r}
+# Defining Taylor's Head Glorys 
+clm <- daily_data$glorys |>
+  filter(site == "Taylor's Head") |>
+  mhw_climatology(
+    hourly = FALSE,
+    start_time = ymd("2000-01-01"),
+    end_time = ymd("2019-12-31")
+  )
+
+clm_long <- clm |>
+  filter(year(t) == 2000) |>
+  select(ind, t, seas, thresh) |>
+  pivot_longer(
+    c(seas, thresh),
+    names_to = "type",
+    values_to = "value"
+  )
+  
+clm |>
+  ggplot(aes(x = ind)) +
+  geom_line(aes(y = temp, group = year(t)), alpha = 0.4) +
+  geom_line(data = clm_long, aes(y = value, color = type, group = type),
+            lwd = 1.3) +
+  scale_color_manual(
+      name = "",
+      values = c("blue", "darkgreen"),
+      breaks = c("seas", "thresh"),
+      labels = c("Seasonal", "Threshold")
+  ) +
+  labs(
+    title = "",
+    x = "Day of year",
+    y = "Temperature [\u00B0C]"
+  ) +
+  theme_bw() +
+  theme(
+    legend.text = element_text(size = 12),
+    strip.text = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12)
+  )
+
+rm("clm", "clm_long")
+```
+
+
+# 2012 NWA Example
+
+```{r}
+ph_ind <- 20
+th_ind <- 24
+glorys_start <- ymd("2012-02-01")
+glorys_end <- ymd("2012-10-31")
+
+ph_clm <- daily_data$glorys |>
+  filter(site == "Port L'Hebert") |>
+  mhw_climatology(
+    hourly = FALSE,
+    start_time = ymd("2000-01-01"),
+    end_time = ymd("2019-12-31")
+  ) |>
+  detect_events()
+
+ph_events <- calculate_events(ph_clm, funcs = event_funcs)
+
+th_clm <- daily_data$glorys |>
+  filter(site == "Taylor's Head") |>
+  mhw_climatology(
+    hourly = FALSE,
+    start_time = ymd("2000-01-01"),
+    end_time = ymd("2019-12-31")
+  ) |>
+  detect_events()
+
+th_events <- calculate_events(th_clm, funcs = event_funcs)
+
+compare_event(
+  clms = list(ph_clm, th_clm), 
+  nums = c(ph_ind, th_ind),
+  labels = c("Port L'Hebert", "Taylor's Head"),
+  start_date = glorys_start,
+  end_date = glorys_end
+) + 
+  scale_x_datetime(date_labels = "%Y-%m") +
+  theme(
+    legend.position = "right",
+    legend.background = element_rect(color = "white"),
+    legend.text = element_text(size = 12),
+    strip.text = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12)
+  ) +
+  guides(col = guide_legend(override.aes = list(lwd = 1.2))) +
+  labs(
+    title = "",
+    x = "Time"
+  )
+
+ph_event <- ph_events |>
+  filter(event_no == ph_ind) |>
+  mutate(site = "Port L'Hebert") |>
+  select(site, duration, date_peak, intensity_mean, intensity_max, intensity_cumulative)
+th_event <- th_events |>
+  filter(event_no == th_ind) |>
+  mutate(site = "Taylor's Head") |>
+  select(site, duration, date_peak, intensity_mean, intensity_max, intensity_cumulative)
+bind_rows(ph_event, th_event)
+
+rm("ph_ind", "th_ind", "glorys_start", "glorys_end",
+   "ph_clm", "th_clm", "ph_events", "th_events",
+   "ph_event", "th_event")
+```
+
+
+
+
+# Parameter Stability Plot
+
+```{r}
+set.seed(842749)
+n <- 2000
+df <- 3
+
+X <- rt(n, df)
+plot(X)
+fit_thresholds(X, c(0,3), nout = 20, alpha = 0.5) +
+  labs(
+    title = "",
+    y = "Parameter estimate"
+  ) +
+  theme_bw() +
+  theme(
+    strip.text = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12)
+  )
+```
+
+
+
