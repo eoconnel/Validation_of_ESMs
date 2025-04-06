@@ -10,7 +10,7 @@ Master of Science in Statistics
 ## Supervisor:  
 Michael Dowd  
 michael.dowd@dal.ca  
-Dalhousie University
+Dalhousie University  
 Department of Mathematics and Statistics  
 
 ## Abstract
