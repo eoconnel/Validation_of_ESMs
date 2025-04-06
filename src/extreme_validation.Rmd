@@ -502,24 +502,37 @@ ph_fvcom2_clm <- ph_fvcom2_clm |>
 ph_fvcom2_events <- calculate_events(ph_fvcom2_clm, funcs = event_funcs, target_col = "exceedance")
 
 
-ph_obs_exceedance_plot <- plot_exceedances(ph_obs_clm,
-                                           start_date = ymd("2018-04-01"),
-                                           end_date = ymd("2018-06-30")) +
+plot_exceedances(ph_obs_clm,
+                 start_date = ymd("2018-04-01"),
+                 end_date = ymd("2018-06-30")) +
   labs(
-    title = "Observation Exceedances at Port L'Hebert"
+    title = "",
+    x = "Time"
+  ) +
+  scale_x_datetime(date_labels = "%Y-%m") +
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12)
   )
-ph_obs_metric_plot <- plot_event_metric(ph_obs_events, ind = "date_peak", 
+
+plot_event_metric(ph_obs_events, ind = "date_peak", 
                                         metric = "exceedance_max",
                                         start_ind = ymd("2018-04-01"),
                                         end_ind = ymd("2018-06-30")) +
   labs(
-    title = "Declustered Observation Exceedances at Port L'Hebert"
+    title = "",
+    x = "Time"
+  ) +
+  scale_x_datetime(date_labels = "%Y-%m") +
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12)
   )
 
 ph_obs_events
 ph_fvcom_events
 ph_fvcom2_events
-ph_obs_exceedance_plot / ph_obs_metric_plot
+#ph_obs_exceedance_plot / ph_obs_metric_plot
 ```
 
 ## Plotting distribution functions

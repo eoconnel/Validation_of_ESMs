@@ -13,7 +13,7 @@ files <- list(
             "../data/TaylorHead/FVCOM_Temperature_TaylorHead_2017_to_2022.nc"),
   glorys = c("../data/Port_LHebert/GLORYS_Temperature_PortLHebert_2000to2020.nc",
              "../data/TaylorHead/GLORYS_Temperature_TaylorHead_2000to2020.nc"),
-  fvcom2 = "../data/eshore_v12_md_step02_v00_new.mat",
+  fvcom2 = "../data/fvcom2/eshore_v12_md_step02_v00_new.mat",
   hourly = "../data/all_data_hourly.csv",
   hourly_clean = "../data/all_data_hourly_clean.csv",
   daily_clean = "../data/all_data_daily_clean.csv" 

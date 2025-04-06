@@ -475,6 +475,7 @@ X_pot |>
 set.seed(861937)
 n <- 200
 start_ind <- 100
+df <- 4
 
 phi <- 0.65
 sig <- sqrt((df / (df - 2)) * (1 - phi))
@@ -501,38 +502,60 @@ X_clm |>
   geom_line(aes(y = thresh), lty = 2, alpha = 0.7) +
   geom_point(data = filter(X_clm, temp > thresh), size = 3, color = "red") +
   labs(
-    title = "POT Approach with AR(1) Data",
+    title = "",
     y = "X",
+    x = "Time"
   ) +
-  scale_x_continuous(
-    name = "",
-    labels = NULL
+  scale_x_date(
+    breaks = ymd("2020-01-02", "2020-01-26", "2020-02-20", "2020-03-16", "2020-04-10"),
+    labels = c("1", "25", "50", "75", "100")
   ) +
-  theme_bw()
+  theme_bw() +
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12)
+  )
 
-X_exceedances <- X_clm |>
+X_clm |>
   plot_exceedances() +
   labs(
     y = "X",
-    title = "Exceedances Above Threshold"
+    x = "Time",
+    title = ""
   ) +
-  theme(axis.text.x = element_blank()) +
-  coord_cartesian(xlim = as_datetime(c(ymd("2020-01-01"), ymd("2020-01-01") + n - start_ind)))
+  scale_x_datetime(
+    breaks = as_datetime(ymd("2020-01-02", "2020-01-26", "2020-02-20", "2020-03-16", "2020-04-10")),
+    labels = c("1", "25", "50", "75", "100")
+  ) +
+  coord_cartesian(xlim = as_datetime(c(ymd("2020-01-01"), ymd("2020-01-01") + n - start_ind))) +
+  theme_bw() +
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12)
+  )
 
-X_declustered <- X_clm |>
+X_clm |>
   calculate_events(funcs = event_funcs, target_col = "exceedance") |>
   plot_event_metric(ind = "date_peak", metric = "exceedance_max") +
   labs(
     y = "X",
-    title = "Declustered Exceedances"
+    x = "Time",
+    title = ""
   ) +
-  theme(axis.text.x = element_blank()) +
-  coord_cartesian(xlim = c(ymd("2020-01-01"), ymd("2020-01-01") + n - start_ind))
+  scale_x_date(
+    breaks = ymd("2020-01-02", "2020-01-26", "2020-02-20", "2020-03-16", "2020-04-09"),
+    labels = c("1", "25", "50", "75", "100")
+  ) +
+  coord_cartesian(xlim = c(ymd("2020-01-01"), ymd("2020-01-01") + n - start_ind)) +
+  theme_bw() +
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12)
+  )
 
-X_exceedances / X_declustered
 
-rm("N", "n", "df", "X", "top", "bottom", "thresh", "X_bm", "X_pot", 
-   "start_ind", "phi", "sig", "X_clm", "X_exceedances", "X_declustered")
+#rm("N", "n", "df", "X", "top", "bottom", "thresh", "X_bm", "X_pot", 
+#   "start_ind", "phi", "sig", "X_clm", "X_exceedances", "X_declustered")
 ```
 
 
