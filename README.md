@@ -4,12 +4,12 @@ Code repository to accompany master's thesis: Improved Validation of Earth Syste
 ## Author:  
 Ethan O'Connell  
 et214214@dal.ca  
-Dalhousie University
+Dalhousie University  
 Master of Science in Statistics  
 
 ## Supervisor:  
-Michael Dowd 
-michael.dowd@dal.ca 
+Michael Dowd  
+michael.dowd@dal.ca  
 Dalhousie University, department of Mathematics and Statistics  
 
 ## Abstract
