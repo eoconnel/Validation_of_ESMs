@@ -10,7 +10,8 @@ Master of Science in Statistics
 ## Supervisor:  
 Michael Dowd  
 michael.dowd@dal.ca  
-Dalhousie University, department of Mathematics and Statistics  
+Dalhousie University
+Department of Mathematics and Statistics  
 
 ## Abstract
 Earth system models are complex numerical models that simulate several aspects of the Earth system. They use coupled systems of partial differential equations to model the physical dynamics of the atmosphere and the oceans, as well as other chemical and biological processes. Due to their nonlinearity and complex geometry, they are solved numerically using a variety of computational approaches. With increases in computational power and model complexity, as well as the increasing availability of calibration datasets, there is an increased need for the assessment of numerical model performance to better inform decision making. In this thesis, we provide an overview of common statistical methods and develop new approaches for the validation of numerical models applicable to Earth system models, with a particular focus on the definition of application-specific validation metrics and diagnostics.
