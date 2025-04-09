@@ -15,7 +15,7 @@ library(heatwaveR)
 library(ncdf4)
 library(R.matlab)
 library(patchwork)
-#library(logKDE)
+library(logKDE)
 ```
 
 ```{r}
@@ -174,7 +174,7 @@ coastline |>
   ) +
   scale_color_manual(
     name = "",
-    values = pal2[1:2],
+    values = pal[1:2],
     breaks = c("Port L'Hebert", "Taylor's Head")
   )
 
